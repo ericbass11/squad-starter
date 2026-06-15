@@ -1,0 +1,11 @@
+# Copie para .env e preencha. O .env NUNCA é versionado.
+# Chaves de LLM vão pelo gateway LiteLLM, não espalhadas por serviço.
+LITELLM_BASE_URL=
+LITELLM_VIRTUAL_KEY=vk-analise-credito-agro
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+
+# Fontes de dado (exemplos — preencha conforme o squad)
+DATABASE_URL=
+SERASA_API_KEY=
+SCR_API_KEY=
