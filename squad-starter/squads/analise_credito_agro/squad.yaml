@@ -1,0 +1,36 @@
+# Sidecar do SQUAD.md — partes que o motor consome (roster + pipeline).
+# O SQUAD.md fica legível para humanos; este YAML alimenta o orchestrator.
+
+roster:
+  - agent: AG1
+    role: "Cedente & sinais de queda"
+    sources: ["SQL", "Bitrix24"]
+    model_tier: powerful
+  - agent: AG4
+    role: "Endividamento x faturamento & nicho"
+    sources: ["SQL", "SCR"]
+    model_tier: powerful
+  - agent: QA
+    role: "Revisão de qualidade; PASS/FAIL"
+    sources: []
+    model_tier: powerful
+
+pipeline:
+  - id: ag1-cedente
+    type: task
+    agent: AG1
+    model_tier: powerful
+    veto_conditions: [assercao_sem_fonte, payment_signal_indefinido]
+  - id: ag4-endividamento
+    type: task
+    agent: AG4
+    model_tier: powerful
+    veto_conditions: [assercao_sem_fonte]
+  - id: qa-review
+    type: task
+    agent: QA
+    role: reviewer
+    on_reject: ag1-cedente
+  - id: aprova-comite
+    type: checkpoint
+    agent: user
