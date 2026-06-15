@@ -1,0 +1,27 @@
+# Spec de exemplo para: python new_squad.py --from scaffolding/spec.example.yaml
+# Copie, renomeie e edite para criar o seu squad.
+name: osint-investigador
+description: Investigação OSINT auditável de cedente/sacado com citação rastreável de fonte.
+context: audax            # audax | externo | pessoal
+profile: agente-ia
+owner: Eric
+max_iterations: 20        # OSINT é multi-hop; teto maior, com wall de tempo
+max_execution_seconds: 120
+max_cost_per_run_usd: 1.20
+qa_reflection_rounds_max: 2
+output_blocked_if:
+  - assercao_sem_fonte
+
+agents:
+  - name: AG1
+    role: Coleta em fontes públicas (Receita, judiciário)
+    sources: [ReceitaFederal, Judiciario]
+    model_tier: powerful
+  - name: AG2
+    role: Grafo de entidades e relacionamentos (Neo4j)
+    sources: [Neo4j, SQL]
+    model_tier: powerful
+  - name: AG3
+    role: Sinais de risco e red flags
+    sources: [Serasa, SCR]
+    model_tier: fast

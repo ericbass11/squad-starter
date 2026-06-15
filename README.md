@@ -41,6 +41,29 @@ docs/adr/              # decisões registradas
 
 ## Como criar um squad novo
 
+Use o gerador — ele garante orchestrator-worker + QA + checkpoint humano no fim,
+e valida contra o schema antes de gravar. Dois modos:
+
+```bash
+python new_squad.py                                   # interativo (pergunta no terminal)
+python new_squad.py --from scaffolding/spec.example.yaml   # por arquivo (preenche um YAML)
+```
+
+O gerador cria `squads/<seu-squad>/` com SQUAD.md, squad.yaml e agents/__init__.py
+(stubs com comentários guiando). Depois:
+
+1. Edite o **SQUAD.md** (condição de término, vetos do domínio).
+2. Troque os **stubs dos agentes** por chamadas reais (SQL/RAG/API/LLM) — cada um
+   retorna um `Handoff` tipado com `sources` rotuladas (fato/inferencia/nao_consta).
+3. `python scripts/validate_squads.py && pytest -q`
+4. `python run.py <seu-squad>` para rodar.
+
+O motor, as seis cercas, os guardrails e o checkpoint humano **não mudam** — só os
+corpos dos agentes. Exemplos prontos: `squads/analise_credito_agro/` e
+`squads/osint_investigador/` (este gerado pelo próprio gerador).
+
+## Como criar um squad novo (manual)
+
 1. Copie `squads/analise_credito_agro/` para `squads/seu_squad/`.
 2. Edite o **SQUAD.md** (objetivo, roster, cercas, governança). Em `context: audax`
    o schema obriga `human_in_the_loop`, `audit_trail: immutable`, `source_citation: required`.

@@ -1,0 +1,50 @@
+roster:
+- agent: AG1
+  role: Coleta em fontes públicas (Receita, judiciário)
+  sources:
+  - ReceitaFederal
+  - Judiciario
+  model_tier: powerful
+- agent: AG2
+  role: Grafo de entidades e relacionamentos (Neo4j)
+  sources:
+  - Neo4j
+  - SQL
+  model_tier: powerful
+- agent: AG3
+  role: Sinais de risco e red flags
+  sources:
+  - Serasa
+  - SCR
+  model_tier: fast
+- agent: QA
+  role: Revisão de qualidade
+  sources: []
+  model_tier: powerful
+pipeline:
+- id: ag1-step
+  type: task
+  agent: AG1
+  model_tier: powerful
+  veto_conditions:
+  - assercao_sem_fonte
+- id: ag2-step
+  type: task
+  agent: AG2
+  model_tier: powerful
+  veto_conditions:
+  - assercao_sem_fonte
+- id: ag3-step
+  type: task
+  agent: AG3
+  model_tier: fast
+  veto_conditions:
+  - assercao_sem_fonte
+- id: qa-review
+  type: task
+  agent: QA
+  role: reviewer
+  on_reject: ag1-step
+- id: aprova-final
+  type: checkpoint
+  agent: user
