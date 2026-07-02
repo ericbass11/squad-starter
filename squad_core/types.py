@@ -36,6 +36,7 @@ class Handoff:
     findings: list[dict[str, Any]] = field(default_factory=list)
     sources: list[Source] = field(default_factory=list)
     confidence: float = 0.0
+    cost_usd: float = 0.0  # spend of this dispatch; the orchestrator sums per run
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -53,15 +54,4 @@ class RunState:
     history: list[dict[str, Any]] = field(default_factory=list)
     result: dict[str, Any] | None = None
     status: str = "idle"  # idle | running | completed | escalated | failed
-
-    def fingerprint(self) -> str:
-        """Cheap state hash to detect no-progress (loop preso)."""
-        import hashlib
-        import json
-
-        payload = json.dumps(
-            {"step": self.step, "history_len": len(self.history),
-             "last": self.history[-1] if self.history else None},
-            sort_keys=True, default=str,
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()[:12]
+    cost_usd: float = 0.0  # accumulated across dispatches; fence 2 enforces the cap

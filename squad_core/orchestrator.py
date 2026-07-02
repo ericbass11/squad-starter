@@ -5,18 +5,20 @@ The PMO decides "what comes next". Workers never talk to each other; they return
 a typed Handoff to the PMO. The loop carries the six fences:
 
   1. max_iterations        — emergency brake
-  2. time/cost budget      — wall
+  2. time/cost budget      — wall (max_execution_seconds + max_cost_per_run_usd)
   3. termination_condition — defined before the happy path
-  4. no_progress           — abort if state stops changing
+  4. no_progress           — abort if a step re-emits the exact same handoff
   5. human checkpoint      — pause at decision points (consultive, human accountable)
   6. transition guardrails — typed handoff + hooks + output discipline
 
 Plus the field-validated mechanisms: declarative pipeline (task/checkpoint,
-on_reject with cap), per-step veto with internal correction BEFORE QA, and
-state.json written every step + archived per run.
+on_reject with cap), per-step veto with real re-dispatch BEFORE QA, state.json
+written every step + archived per run, and an append-only events.jsonl so the
+audit trail is actually immutable.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -31,6 +33,11 @@ AgentFn = Callable[[RunState], Handoff]
 CheckpointFn = Callable[[RunState, dict], bool]
 
 
+class AgentError(Exception):
+    """An agent crashed or broke the typed-handoff contract. The run is
+    archived as 'failed' — the audit trail survives the crash."""
+
+
 class Orchestrator:
     def __init__(self, manifest: dict, agents: dict[str, AgentFn],
                  checkpoint: CheckpointFn | None = None,
@@ -40,6 +47,7 @@ class Orchestrator:
         self.checkpoint = checkpoint or (lambda s, step: True)
         self.out_dir = out_dir
         self.allowed = self._allowed_sources()
+        self._validate_pipeline()  # fail fast, before any agent runs
 
     # ---- fences as config, read from the manifest frontmatter ----
     @property
@@ -49,6 +57,11 @@ class Orchestrator:
     @property
     def max_seconds(self) -> int:
         return int(self.m.get("max_execution_seconds", 90))
+
+    @property
+    def max_cost(self) -> float | None:
+        v = self.m.get("max_cost_per_run_usd")
+        return None if v is None else float(v)
 
     @property
     def reflection_max(self) -> int:
@@ -64,18 +77,42 @@ class Orchestrator:
             out[a["agent"]] = set(a.get("sources", []))
         return out
 
+    def _validate_pipeline(self) -> None:
+        """A malformed pipeline must not start — a mid-run KeyError would kill
+        the run without an audit trail. Everything referential is checked here."""
+        pipeline = self.m.get("pipeline") or []
+        if not pipeline:
+            raise ValueError("manifest sem pipeline — nada a executar")
+        ids = [s.get("id") for s in pipeline]
+        if None in ids or len(ids) != len(set(ids)):
+            raise ValueError("todo step do pipeline precisa de um id único")
+        for s in pipeline:
+            stype = s.get("type", "task")
+            if stype not in ("task", "checkpoint"):
+                raise ValueError(f"step {s['id']}: tipo inválido '{stype}'")
+            if stype == "task" and s.get("agent") not in self.agents:
+                raise ValueError(
+                    f"step {s['id']}: agente '{s.get('agent')}' não registrado "
+                    f"(registrados: {sorted(self.agents)})")
+            target = s.get("on_reject")
+            if target and target not in ids:
+                raise ValueError(f"step {s['id']}: on_reject aponta para step "
+                                 f"inexistente: {target}")
+
     # ---- the loop ----
     def run(self, run_id: str, task: dict) -> RunState:
         state = RunState(squad=self.m["name"], run_id=run_id, task=task, status="running")
         run_path = Path(self.out_dir) / run_id
         run_path.mkdir(parents=True, exist_ok=True)
+        self._log_event(run_path, {"event": "run_start", "squad": state.squad,
+                                   "run_id": run_id, "task": task})
         deadline = time.monotonic() + self.max_seconds
         pipeline = self.m["pipeline"]
         reject_counts: dict[str, int] = {}
+        seen: set[tuple[str, str]] = set()  # (step_id, handoff hash) — fence 4
 
         i = 0
         idx = 0
-        last_fp = None
         while idx < len(pipeline):
             step = pipeline[idx]
             i += 1
@@ -84,14 +121,11 @@ class Orchestrator:
             # fence 1 — max_iterations
             if i > self.max_iterations:
                 return self._finish(run_path, state, "escalated", "max_iterations")
-            # fence 2 — time wall
+            # fence 2 — time/cost wall
             if time.monotonic() > deadline:
                 return self._finish(run_path, state, "escalated", "timeout")
-            # fence 4 — no_progress
-            fp = state.fingerprint()
-            if self.m.get("stop_on_no_progress", True) and fp == last_fp:
-                return self._finish(run_path, state, "escalated", "no_progress")
-            last_fp = fp
+            if self.max_cost is not None and state.cost_usd > self.max_cost:
+                return self._finish(run_path, state, "escalated", "cost_budget")
 
             stype = step.get("type", "task")
 
@@ -100,6 +134,8 @@ class Orchestrator:
                 approved = self.checkpoint(state, step)
                 state.history.append({"step": step["id"], "type": "checkpoint",
                                       "approved": approved})
+                self._log_event(run_path, {"event": "checkpoint", "step": step["id"],
+                                           "approved": approved})
                 if not approved:
                     return self._finish(run_path, state, "escalated", "checkpoint_rejected")
                 idx += 1
@@ -108,25 +144,46 @@ class Orchestrator:
             # task step — dispatch to the named agent
             agent_name = step["agent"]
             agent = self.agents[agent_name]
-            handoff = agent(state)
 
-            # fence 6 — transition guardrails
             try:
-                secret_scan(json.dumps(handoff.to_dict(), default=str))
+                handoff = self._dispatch(agent_name, agent, state)
+                # per-step veto with real re-dispatch BEFORE QA (max 2 tries)
+                handoff = self._apply_veto(step, handoff, agent_name, agent, state)
+                # fence 6 — transition guardrails on the final handoff
+                payload = json.dumps(handoff.to_dict(), default=str)
+                secret_scan(payload)
                 requested = {s.source for s in handoff.sources}
                 blast_radius(agent_name, requested, self.allowed)
-                # per-step veto + internal correction BEFORE QA (max 2 tries)
-                self._apply_veto(step, handoff)
                 output_guardrail(handoff, self.blocked_if,
                                  is_reviewer=(step.get("role") == "reviewer"))
+            except AgentError as e:
+                state.history.append({"step": step["id"], "agent": agent_name,
+                                      "error": str(e)})
+                self._log_event(run_path, {"event": "agent_error", "step": step["id"],
+                                           "error": str(e)})
+                return self._finish(run_path, state, "failed", "agent_exception")
             except GuardrailError as e:
                 state.history.append({"step": step["id"], "agent": agent_name,
                                       "guardrail": str(e)})
+                self._log_event(run_path, {"event": "guardrail_block", "step": step["id"],
+                                           "guardrail": str(e)})
                 return self._finish(run_path, state, "escalated", str(e))
+
+            # fence 4 — no_progress: the same step re-emitting the same handoff
+            fp = (step["id"], hashlib.sha256(payload.encode()).hexdigest())
+            if self.m.get("stop_on_no_progress", True) and fp in seen:
+                state.history.append({"step": step["id"], "agent": agent_name,
+                                      "no_progress": True})
+                return self._finish(run_path, state, "escalated", "no_progress")
+            seen.add(fp)
 
             state.history.append({"step": step["id"], "agent": agent_name,
                                   "handoff": handoff.to_dict()})
             state.step = i
+            self._log_event(run_path, {"event": "handoff", "step": step["id"],
+                                       "agent": agent_name, "status": handoff.status.value,
+                                       "confidence": handoff.confidence,
+                                       "cost_usd": handoff.cost_usd})
 
             # on_reject — declarative reflection loop with a cap
             if handoff.status == Status.NEEDS_HUMAN and step.get("on_reject"):
@@ -144,21 +201,36 @@ class Orchestrator:
         state.result = state.history[-1] if state.history else None
         return self._finish(run_path, state, "completed", "ok")
 
-    # ---- veto with internal correction (max 2) ----
-    def _apply_veto(self, step: dict, handoff: Handoff) -> None:
+    # ---- dispatch: enforce the typed contract, keep the audit trail on crash ----
+    def _dispatch(self, agent_name: str, agent: AgentFn, state: RunState) -> Handoff:
+        try:
+            handoff = agent(state)
+        except Exception as e:  # noqa: BLE001 — any crash becomes an archived failure
+            raise AgentError(f"{agent_name}: {e!r}") from e
+        if not isinstance(handoff, Handoff):
+            raise AgentError(f"{agent_name} não retornou um Handoff tipado")
+        state.cost_usd += float(handoff.cost_usd or 0.0)
+        return handoff
+
+    # ---- veto with internal correction: re-dispatch the agent (max 2) ----
+    def _apply_veto(self, step: dict, handoff: Handoff, agent_name: str,
+                    agent: AgentFn, state: RunState) -> Handoff:
         vetos = step.get("veto_conditions", [])
         if not vetos:
-            return
-        for attempt in range(2):
+            return handoff
+        for attempt in (1, 2):
             failed = self._check_vetos(vetos, handoff)
             if not failed:
-                return
-            # In a real squad you'd re-dispatch the agent with the veto feedback.
-            # Here we surface it; the agent fn is responsible for self-correction.
-            handoff.findings.append({"veto_feedback": failed, "attempt": attempt + 1})
+                return handoff
+            # surface the feedback in state, then re-dispatch: the agent fn reads
+            # the veto_feedback from history and self-corrects.
+            state.history.append({"step": step["id"], "agent": agent_name,
+                                  "veto_feedback": failed, "attempt": attempt})
+            handoff = self._dispatch(agent_name, agent, state)
         still = self._check_vetos(vetos, handoff)
         if still:
             raise GuardrailError(f"veto não resolvido após 2 tentativas: {still}")
+        return handoff
 
     @staticmethod
     def _check_vetos(vetos: list[str], handoff: Handoff) -> list[str]:
@@ -174,30 +246,37 @@ class Orchestrator:
 
     @staticmethod
     def _index_of(pipeline: list[dict], step_id: str) -> int:
-        for k, s in enumerate(pipeline):
-            if s["id"] == step_id:
-                return k
-        raise ValueError(f"on_reject aponta para step inexistente: {step_id}")
+        return next(k for k, s in enumerate(pipeline) if s["id"] == step_id)
 
-    # ---- state.json: write every step, archive per run ----
+    # ---- audit trail: state.json snapshot per step + append-only events.jsonl ----
     def _write_state(self, run_path: Path, state: RunState, step: dict) -> None:
         snapshot = {
             "squad": state.squad, "run_id": state.run_id, "status": state.status,
             "step": {"current": state.step, "label": step.get("id")},
             "history_len": len(state.history),
+            "cost_usd": state.cost_usd,
             "updatedAt": time.time(),
         }
         (run_path / "state.json").write_text(json.dumps(snapshot, indent=2,
                                                         ensure_ascii=False))
 
+    @staticmethod
+    def _log_event(run_path: Path, event: dict) -> None:
+        line = json.dumps({"ts": time.time(), **event}, ensure_ascii=False, default=str)
+        with (run_path / "events.jsonl").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
     def _finish(self, run_path: Path, state: RunState, status: str, reason: str) -> RunState:
         state.status = status
         archive = {
             "squad": state.squad, "run_id": state.run_id, "status": status,
-            "reason": reason, "steps": state.step, "history": state.history,
-            "result": state.result, "completedAt": time.time(),
+            "reason": reason, "steps": state.step, "cost_usd": state.cost_usd,
+            "history": state.history, "result": state.result,
+            "completedAt": time.time(),
         }
         # archive the run state permanently (audit trail)
         (run_path / "state.json").write_text(json.dumps(archive, indent=2,
                                                         ensure_ascii=False))
+        self._log_event(run_path, {"event": "run_finish", "status": status,
+                                   "reason": reason, "cost_usd": state.cost_usd})
         return state
