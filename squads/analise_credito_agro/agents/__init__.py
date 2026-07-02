@@ -2,13 +2,36 @@
 Example agents for the credit squad.
 
 These are STUBS that respect the Handoff contract — they show the shape of a real
-agent (typed output, sources with fato/inferencia/nao_consta, confidence) without
-calling a real LLM. Replace the bodies with real SQL/RAG/LLM calls; the engine,
-fences and guardrails stay the same.
+agent (typed output, sources with fato/inferencia/nao_consta, confidence, cost)
+without calling a real LLM. Replace the bodies with real SQL/RAG/LLM calls; the
+engine, fences and guardrails stay the same.
+
+Real LLM pattern (via gateway — configure .env):
+
+    from squad_core import LLMClient
+    llm = LLMClient()   # lê LITELLM_BASE_URL / LITELLM_VIRTUAL_KEY do ambiente
+    res = llm.complete("Analise o cedente X...", system="Você é analista...",
+                       tier="powerful")
+    return Handoff(..., findings=[...], cost_usd=res.cost_usd)
+
+Domain vetos live HERE (the engine only ships assercao_sem_fonte): export a
+VETOS dict {nome: fn(handoff) -> bool} and reference the names in squad.yaml.
 """
 from __future__ import annotations
 
 from squad_core import Handoff, RunState, Source, Status
+
+_PAYMENT_SIGNALS = ("direto", "repasse", "recompra", "n/a")
+
+
+def _veto_payment_signal(handoff: Handoff) -> bool:
+    """repasse e recompra são idênticos no extrato e dizem o oposto sobre o
+    sacado — um payment_signal fora do vocabulário fechado bloqueia o handoff."""
+    for f in handoff.findings:
+        if isinstance(f, dict) and "payment_signal" in f \
+           and f["payment_signal"] not in _PAYMENT_SIGNALS:
+            return True
+    return False
 
 
 def ag1_cedente(state: RunState) -> Handoff:
@@ -69,4 +92,8 @@ REGISTRY = {
     "AG1": ag1_cedente,
     "AG4": ag4_endividamento,
     "QA": qa_review,
+}
+
+VETOS = {
+    "payment_signal_indefinido": _veto_payment_signal,
 }

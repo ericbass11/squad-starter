@@ -17,6 +17,11 @@ class Status(str, Enum):
     FAILED = "failed"
 
 
+class TransientAgentError(Exception):
+    """A recoverable failure (rate limit, timeout, 5xx). The orchestrator
+    retries the dispatch with backoff instead of failing the run."""
+
+
 # Source citation discipline: every assertion is one of these.
 SourceType = Literal["fato", "inferencia", "nao_consta"]
 

@@ -20,3 +20,5 @@ jobs:
         run: python scripts/validate_squads.py
       - name: Testes
         run: pytest -q
+      - name: Smoke E2E (squad de exemplo, checkpoint aprovado)
+        run: python run.py --approve

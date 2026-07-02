@@ -47,6 +47,7 @@ class SquadSpec:
     context: str = "audax"          # audax | externo | pessoal
     profile: str = "agente-ia"
     owner: str = "Eric"
+    termination: str = ""           # condição de término, definida ANTES do happy path
     regulatory: list[str] = field(default_factory=lambda: ["BACEN", "CMN", "LGPD"])
     max_iterations: int = 12
     max_execution_seconds: int = 90
@@ -102,9 +103,6 @@ def _frontmatter(spec: SquadSpec) -> dict:
         "human_in_the_loop": True,
         "source_citation": "required",
         "output_blocked_if": spec.output_blocked_if,
-        "state_per_step": True,
-        "archive_run_state": True,
-        "output_versioning": True,
     }
     if spec.context == "audax":
         fm["regulatory"] = spec.regulatory
@@ -132,8 +130,8 @@ def _squad_md(spec: SquadSpec) -> str:
 
 **Entrega:** {spec.description}
 
-**Termina quando:** [escreva a condição ANTES do happy path — ex.: recomendação
-emitida com os campos obrigatórios; "nao_consta" registrado para o que não se verificou].
+**Termina quando:** {spec.termination or '''[escreva a condição ANTES do happy path — ex.: recomendação
+emitida com os campos obrigatórios; "nao_consta" registrado para o que não se verificou]'''}.
 
 **Não faz:** decidir sozinho onde há accountability humana.
 
@@ -196,6 +194,10 @@ def _agents_py(spec: SquadSpec) -> str:
     - Só acesse as fontes declaradas no roster ({", ".join(a.sources) or "nenhuma"}),
       senão o blast_radius bloqueia.
     - Defina confidence honestamente (0.0–1.0).
+    - Com LLM: use o gateway e repasse o custo (a cerca de custo depende disso):
+        llm = LLMClient()
+        res = llm.complete("prompt...", tier="{a.model_tier}")
+        ... cost_usd=res.cost_usd
     """
     # exemplo (REMOVA ao implementar):
     return Handoff(
@@ -206,6 +208,7 @@ def _agents_py(spec: SquadSpec) -> str:
             Source(claim="descreva o achado", source="{(a.sources or ["SQL"])[0]}", type="fato"),
         ],
         confidence=0.7,
+        cost_usd=0.0,
     )
 ''')
 
@@ -233,10 +236,13 @@ def _agents_py(spec: SquadSpec) -> str:
     return f'''"""
 Agentes do squad {spec.name}. Stubs com guia — troque os corpos por lógica real.
 O motor (cercas, guardrails, checkpoint) NÃO muda; só estes corpos mudam.
+
+Para chamadas LLM reais, use o gateway (configure o .env na raiz):
+    from squad_core import LLMClient
 """
 from __future__ import annotations
 
-from squad_core import Handoff, RunState, Source, Status
+from squad_core import Handoff, LLMClient, RunState, Source, Status  # noqa: F401
 
 
 {body}
@@ -244,6 +250,11 @@ from squad_core import Handoff, RunState, Source, Status
 REGISTRY = {{
     {registry},
 }}
+
+# Vetos de domínio deste squad: {{nome: fn(handoff) -> bool}} (True = violado).
+# Referencie os nomes em veto_conditions no squad.yaml. O motor já traz
+# assercao_sem_fonte; adicione aqui os do SEU domínio.
+VETOS = {{}}
 '''
 
 

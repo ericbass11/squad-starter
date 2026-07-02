@@ -1,6 +1,6 @@
 ---
 name: osint-investigador
-version: 0.1.0
+version: 0.2.0
 description: Investigação OSINT auditável de cedente/sacado com citação rastreável
   de fonte.
 owner: Eric
@@ -18,9 +18,6 @@ human_in_the_loop: true
 source_citation: required
 output_blocked_if:
 - assercao_sem_fonte
-state_per_step: true
-archive_run_state: true
-output_versioning: true
 regulatory:
 - BACEN
 - CMN
@@ -37,8 +34,9 @@ audit_trail: immutable
 
 **Entrega:** Investigação OSINT auditável de cedente/sacado com citação rastreável de fonte.
 
-**Termina quando:** [escreva a condição ANTES do happy path — ex.: recomendação
-emitida com os campos obrigatórios; "nao_consta" registrado para o que não se verificou].
+**Termina quando:** o dossiê OSINT é emitido com as três dimensões cobertas
+(fontes públicas, grafo de relacionamentos, red flags), toda asserção com fonte
+rotulada, e "nao_consta" registrado para o que não se verificou.
 
 **Não faz:** decidir sozinho onde há accountability humana.
 

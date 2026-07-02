@@ -12,9 +12,13 @@ a typed Handoff to the PMO. The loop carries the six fences:
   6. transition guardrails — typed handoff + hooks + output discipline
 
 Plus the field-validated mechanisms: declarative pipeline (task/checkpoint,
-on_reject with cap), per-step veto with real re-dispatch BEFORE QA, state.json
-written every step + archived per run, and an append-only events.jsonl so the
-audit trail is actually immutable.
+on_reject with cap), per-step veto with real re-dispatch BEFORE QA, transient
+error retry with backoff, and the always-on audit trail: state.json snapshot per
+step, append-only events.jsonl, final archive, and result.json frozen per run.
+Auditability is not a knob — it cannot be turned off.
+
+Domain vetos are pluggable: pass `vetos={"nome": fn}` where fn(handoff) -> bool
+(True = condição violada). The builtin `assercao_sem_fonte` is always available.
 """
 from __future__ import annotations
 
@@ -25,12 +29,20 @@ from pathlib import Path
 from typing import Callable
 
 from .guardrails import GuardrailError, blast_radius, output_guardrail, secret_scan
-from .types import Handoff, RunState, Status
+from .types import Handoff, RunState, Status, TransientAgentError
 
 # An agent is any callable: (state) -> Handoff. Register them by name.
 AgentFn = Callable[[RunState], Handoff]
 # A human checkpoint callable: (state, step) -> bool (approved?).
 CheckpointFn = Callable[[RunState, dict], bool]
+# A domain veto: (handoff) -> bool. True = the veto condition is violated.
+VetoFn = Callable[[Handoff], bool]
+# An observability hook: receives every audit event (for Langfuse etc.).
+EventFn = Callable[[dict], None]
+
+BUILTIN_VETOS: dict[str, VetoFn] = {
+    "assercao_sem_fonte": lambda h: bool(h.findings and not h.sources),
+}
 
 
 class AgentError(Exception):
@@ -41,10 +53,14 @@ class AgentError(Exception):
 class Orchestrator:
     def __init__(self, manifest: dict, agents: dict[str, AgentFn],
                  checkpoint: CheckpointFn | None = None,
+                 vetos: dict[str, VetoFn] | None = None,
+                 on_event: EventFn | None = None,
                  out_dir: str = "output"):
         self.m = manifest
         self.agents = agents
         self.checkpoint = checkpoint or (lambda s, step: True)
+        self.vetos = {**BUILTIN_VETOS, **(vetos or {})}
+        self.on_event = on_event
         self.out_dir = out_dir
         self.allowed = self._allowed_sources()
         self._validate_pipeline()  # fail fast, before any agent runs
@@ -66,6 +82,14 @@ class Orchestrator:
     @property
     def reflection_max(self) -> int:
         return int(self.m.get("qa_reflection_rounds_max", 2))
+
+    @property
+    def retry_max(self) -> int:
+        return int(self.m.get("agent_retry_max", 2))
+
+    @property
+    def retry_backoff(self) -> float:
+        return float(self.m.get("agent_retry_backoff_seconds", 1.0))
 
     @property
     def blocked_if(self) -> list[str]:
@@ -94,6 +118,11 @@ class Orchestrator:
                 raise ValueError(
                     f"step {s['id']}: agente '{s.get('agent')}' não registrado "
                     f"(registrados: {sorted(self.agents)})")
+            for v in s.get("veto_conditions", []):
+                if v not in self.vetos:
+                    raise ValueError(
+                        f"step {s['id']}: veto '{v}' não registrado — exporte-o "
+                        f"no VETOS do módulo de agentes (conhecidos: {sorted(self.vetos)})")
             target = s.get("on_reject")
             if target and target not in ids:
                 raise ValueError(f"step {s['id']}: on_reject aponta para step "
@@ -155,7 +184,8 @@ class Orchestrator:
                 requested = {s.source for s in handoff.sources}
                 blast_radius(agent_name, requested, self.allowed)
                 output_guardrail(handoff, self.blocked_if,
-                                 is_reviewer=(step.get("role") == "reviewer"))
+                                 is_reviewer=(step.get("role") == "reviewer"),
+                                 rating_scale=self.m.get("rating_scale"))
             except AgentError as e:
                 state.history.append({"step": step["id"], "agent": agent_name,
                                       "error": str(e)})
@@ -197,16 +227,27 @@ class Orchestrator:
 
             idx += 1
 
-        # fence 3 — termination: pipeline consumed cleanly
-        state.result = state.history[-1] if state.history else None
+        # fence 3 — termination: pipeline consumed cleanly. The result is the
+        # last HANDOFF (the deliverable), not the trailing checkpoint entry.
+        state.result = next((h for h in reversed(state.history) if h.get("handoff")),
+                            state.history[-1] if state.history else None)
         return self._finish(run_path, state, "completed", "ok")
 
-    # ---- dispatch: enforce the typed contract, keep the audit trail on crash ----
+    # ---- dispatch: typed contract + transient retry + audit on crash ----
     def _dispatch(self, agent_name: str, agent: AgentFn, state: RunState) -> Handoff:
-        try:
-            handoff = agent(state)
-        except Exception as e:  # noqa: BLE001 — any crash becomes an archived failure
-            raise AgentError(f"{agent_name}: {e!r}") from e
+        for attempt in range(self.retry_max + 1):
+            try:
+                handoff = agent(state)
+                break
+            except TransientAgentError as e:
+                if attempt >= self.retry_max:
+                    raise AgentError(f"{agent_name}: transiente não resolvido após "
+                                     f"{self.retry_max + 1} tentativas: {e}") from e
+                state.history.append({"agent": agent_name, "retry": attempt + 1,
+                                      "transient_error": str(e)})
+                time.sleep(self.retry_backoff * (2 ** attempt))
+            except Exception as e:  # noqa: BLE001 — any crash becomes an archived failure
+                raise AgentError(f"{agent_name}: {e!r}") from e
         if not isinstance(handoff, Handoff):
             raise AgentError(f"{agent_name} não retornou um Handoff tipado")
         state.cost_usd += float(handoff.cost_usd or 0.0)
@@ -232,23 +273,14 @@ class Orchestrator:
             raise GuardrailError(f"veto não resolvido após 2 tentativas: {still}")
         return handoff
 
-    @staticmethod
-    def _check_vetos(vetos: list[str], handoff: Handoff) -> list[str]:
-        failed = []
-        flat = json.dumps(handoff.to_dict(), default=str).lower()
-        for v in vetos:
-            if v == "assercao_sem_fonte" and handoff.findings and not handoff.sources:
-                failed.append(v)
-            if v == "payment_signal_indefinido" and "payment_signal" in flat \
-               and '"n/a"' not in flat and "indefinido" in flat:
-                failed.append(v)
-        return failed
+    def _check_vetos(self, vetos: list[str], handoff: Handoff) -> list[str]:
+        return [v for v in vetos if self.vetos[v](handoff)]
 
     @staticmethod
     def _index_of(pipeline: list[dict], step_id: str) -> int:
         return next(k for k, s in enumerate(pipeline) if s["id"] == step_id)
 
-    # ---- audit trail: state.json snapshot per step + append-only events.jsonl ----
+    # ---- audit trail (always on): state.json per step + append-only events.jsonl ----
     def _write_state(self, run_path: Path, state: RunState, step: dict) -> None:
         snapshot = {
             "squad": state.squad, "run_id": state.run_id, "status": state.status,
@@ -260,11 +292,16 @@ class Orchestrator:
         (run_path / "state.json").write_text(json.dumps(snapshot, indent=2,
                                                         ensure_ascii=False))
 
-    @staticmethod
-    def _log_event(run_path: Path, event: dict) -> None:
-        line = json.dumps({"ts": time.time(), **event}, ensure_ascii=False, default=str)
+    def _log_event(self, run_path: Path, event: dict) -> None:
+        event = {"ts": time.time(), **event}
+        line = json.dumps(event, ensure_ascii=False, default=str)
         with (run_path / "events.jsonl").open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+        if self.on_event:
+            try:
+                self.on_event(event)
+            except Exception:  # noqa: BLE001 — observabilidade nunca derruba o run
+                pass
 
     def _finish(self, run_path: Path, state: RunState, status: str, reason: str) -> RunState:
         state.status = status
@@ -277,6 +314,13 @@ class Orchestrator:
         # archive the run state permanently (audit trail)
         (run_path / "state.json").write_text(json.dumps(archive, indent=2,
                                                         ensure_ascii=False))
+        if status == "completed":
+            # frozen deliverable of the run — what depends_on consumers read
+            (run_path / "result.json").write_text(json.dumps(
+                {"squad": state.squad, "run_id": state.run_id,
+                 "result": state.result, "cost_usd": state.cost_usd,
+                 "completedAt": archive["completedAt"]},
+                indent=2, ensure_ascii=False))
         self._log_event(run_path, {"event": "run_finish", "status": status,
                                    "reason": reason, "cost_usd": state.cost_usd})
         return state

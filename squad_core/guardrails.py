@@ -47,7 +47,8 @@ def blast_radius(agent_name: str, requested_sources: set[str],
 
 
 def output_guardrail(handoff: Handoff, blocked_if: list[str],
-                     is_reviewer: bool = False) -> None:
+                     is_reviewer: bool = False,
+                     rating_scale: list[str] | None = None) -> None:
     """Enforce source-citation discipline and domain veto flags.
 
     Reviewer agents (QA) consolidate upstream findings and do not cite data
@@ -61,6 +62,14 @@ def output_guardrail(handoff: Handoff, blocked_if: list[str],
     for s in handoff.sources:
         if s.type not in ("fato", "inferencia", "nao_consta"):
             raise GuardrailError(f"output_guardrail: tipo de fonte inválido: {s.type}")
+
+    # A rating outside the declared scale never leaves the squad.
+    if rating_scale:
+        for f in handoff.findings:
+            rating = f.get("rating") if isinstance(f, dict) else None
+            if rating is not None and rating not in rating_scale:
+                raise GuardrailError(
+                    f"output_guardrail: rating '{rating}' fora da escala {rating_scale}")
 
     # Credit example: a rating must carry confidence + reasons + precedents.
     needs_rating_pack = any(

@@ -39,6 +39,7 @@ def _interactive() -> SquadSpec:
     name = _ask("Nome (kebab-case, ex.: osint-investigador)")
     desc = _ask("Descrição (uma frase)")
     context = _ask("Contexto (audax/externo/pessoal)", "audax")
+    termination = _ask("Termina quando (condição ANTES do happy path)")
     agents: list[AgentSpec] = []
     print("\nAgentes de trabalho (enter no nome para encerrar):")
     i = 1
@@ -53,7 +54,8 @@ def _interactive() -> SquadSpec:
                                 sources=[s.strip() for s in srcs.split(",") if s.strip()],
                                 model_tier=tier))
         i += 1
-    return SquadSpec(name=name, description=desc, context=context, agents=agents)
+    return SquadSpec(name=name, description=desc, context=context,
+                     termination=termination, agents=agents)
 
 
 def main() -> int:

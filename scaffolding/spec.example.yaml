@@ -1,11 +1,16 @@
 # Spec de exemplo para: python new_squad.py --from scaffolding/spec.example.yaml
 # Copie, renomeie e edite para criar o seu squad.
-name: osint-investigador
-description: Investigação OSINT auditável de cedente/sacado com citação rastreável de fonte.
+# (o squads/osint_investigador/ do repo foi gerado por um spec como este)
+name: due-diligence-fornecedor
+description: Due diligence auditável de fornecedor com citação rastreável de fonte.
+termination: >-
+  o parecer de due diligence é emitido cobrindo cadastro, saúde financeira e
+  compliance, toda asserção com fonte rotulada, e "nao_consta" registrado para
+  o que não se verificou
 context: audax            # audax | externo | pessoal
 profile: agente-ia
 owner: Eric
-max_iterations: 20        # OSINT é multi-hop; teto maior, com wall de tempo
+max_iterations: 20        # verificação multi-hop; teto maior, com wall de tempo
 max_execution_seconds: 120
 max_cost_per_run_usd: 1.20
 qa_reflection_rounds_max: 2
@@ -14,14 +19,14 @@ output_blocked_if:
 
 agents:
   - name: AG1
-    role: Coleta em fontes públicas (Receita, judiciário)
-    sources: [ReceitaFederal, Judiciario]
+    role: Cadastro e situação fiscal (Receita, certidões)
+    sources: [ReceitaFederal, Certidoes]
     model_tier: powerful
   - name: AG2
-    role: Grafo de entidades e relacionamentos (Neo4j)
-    sources: [Neo4j, SQL]
+    role: Saúde financeira e histórico de pagamento
+    sources: [Serasa, SQL]
     model_tier: powerful
   - name: AG3
-    role: Sinais de risco e red flags
-    sources: [Serasa, SCR]
+    role: Compliance e mídia negativa
+    sources: [Judiciario, Web]
     model_tier: fast

@@ -58,6 +58,7 @@ def _manifest():
         "name": "test-squad", "version": "0.1.0",
         "max_iterations": 10, "max_execution_seconds": 30,
         "qa_reflection_rounds_max": 1, "stop_on_no_progress": True,
+        "agent_retry_backoff_seconds": 0,
         "output_blocked_if": ["assercao_sem_fonte"],
         "roster": [{"agent": "A", "sources": ["SQL"]}],
         "pipeline": [
@@ -159,6 +160,92 @@ def test_malformed_pipeline_refused_before_running(tmp_path):
     m["pipeline"][0]["on_reject"] = "step-fantasma"
     with pytest.raises(ValueError):
         Orchestrator(m, {"A": lambda s: None}, out_dir=str(tmp_path))
+
+
+def test_transient_error_retried_then_succeeds(tmp_path):
+    from squad_core import TransientAgentError
+    calls = {"n": 0}
+
+    def agent_a(state: RunState) -> Handoff:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientAgentError("rate limit")
+        return Handoff(agent="A", status=Status.OK, findings=[{"ok": True}],
+                       sources=[Source("c", "SQL", "fato")], confidence=0.9)
+
+    orch = Orchestrator(_manifest(), {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-retry", {"task": "t"})
+    assert state.status == "completed"
+    assert calls["n"] == 2
+    assert any(h.get("transient_error") for h in state.history)  # retry auditado
+
+
+def test_transient_error_exhausted_fails_archived(tmp_path):
+    from squad_core import TransientAgentError
+
+    def agent_a(state: RunState) -> Handoff:
+        raise TransientAgentError("gateway fora")
+
+    m = _manifest()
+    m["agent_retry_max"] = 1
+    orch = Orchestrator(m, {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-retry2", {"task": "t"})
+    assert state.status == "failed"
+    archived = json.loads((tmp_path / "run-retry2" / "state.json").read_text())
+    assert archived["reason"] == "agent_exception"
+
+
+def test_custom_domain_veto_pluggable(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        corrected = any(h.get("veto_feedback") for h in state.history)
+        return Handoff(agent="A", status=Status.OK,
+                       findings=[{"valor": 10 if corrected else -1}],
+                       sources=[Source("c", "SQL", "fato")], confidence=0.9)
+
+    m = _manifest()
+    m["pipeline"][0]["veto_conditions"] = ["valor_negativo"]
+    vetos = {"valor_negativo": lambda h: any(
+        isinstance(f, dict) and f.get("valor", 0) < 0 for f in h.findings)}
+    orch = Orchestrator(m, {"A": agent_a}, vetos=vetos, out_dir=str(tmp_path))
+    state = orch.run("run-veto-dom", {"task": "t"})
+    assert state.status == "completed"
+
+
+def test_unknown_veto_name_refused_before_running(tmp_path):
+    m = _manifest()
+    m["pipeline"][0]["veto_conditions"] = ["veto_que_nao_existe"]
+    with pytest.raises(ValueError, match="veto"):
+        Orchestrator(m, {"A": lambda s: None}, out_dir=str(tmp_path))
+
+
+def test_rating_fora_da_escala_bloqueado(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        return Handoff(agent="A", status=Status.OK,
+                       findings=[{"rating": "Z"}],
+                       sources=[Source("c", "SQL", "fato")], confidence=0.9)
+
+    m = _manifest()
+    m["rating_scale"] = ["A", "B", "C"]
+    orch = Orchestrator(m, {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-scale", {"task": "t"})
+    assert state.status == "escalated"
+    archived = json.loads((tmp_path / "run-scale" / "state.json").read_text())
+    assert "fora da escala" in archived["reason"]
+
+
+def test_result_json_congelado_ao_completar(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        return Handoff(agent="A", status=Status.OK, findings=[{"ok": True}],
+                       sources=[Source("c", "SQL", "fato")], confidence=0.9,
+                       cost_usd=0.10)
+
+    orch = Orchestrator(_manifest(), {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-result", {"task": "t"})
+    assert state.status == "completed"
+    frozen = json.loads((tmp_path / "run-result" / "result.json").read_text())
+    assert frozen["squad"] == "test-squad"
+    assert frozen["cost_usd"] == pytest.approx(0.10)
+    assert frozen["result"]["handoff"]["findings"] == [{"ok": True}]
 
 
 def test_veto_redispatches_and_agent_self_corrects(tmp_path):

@@ -1,7 +1,7 @@
 ---
 # ═══════════════ IDENTIDADE ═══════════════
 name: analise-credito-agro
-version: 0.3.0
+version: 0.4.0
 description: Recomendação consultiva de crédito (rating + confiança + razões + precedentes) para o comitê. Piloto Agro.
 owner: Eric
 profile: agente-ia
@@ -25,12 +25,9 @@ qa_reflection_rounds_max: 2
 
 # ═══════════════ GOVERNANÇA (enforced, não prosa) ═══════════════
 human_in_the_loop: true
-audit_trail: immutable
+audit_trail: immutable                  # sempre-ligado no motor: state.json por step + events.jsonl + result.json congelado
 source_citation: required               # toda asserção: fato | inferencia | nao_consta
 output_blocked_if: [rating_sem_confianca, rating_sem_razoes, rating_sem_precedentes, assercao_sem_fonte]
-state_per_step: true                    # state.json antes de cada step e após handoff
-archive_run_state: true                 # arquiva state.json em output/{run_id}/
-output_versioning: true                 # parecer congelado por run: output/{run_id}/v{n}/
 
 # ═══════════════ ESCALA DE RATING ═══════════════
 rating_scale: [A, B, "D+", "D-", E, F]
@@ -79,6 +76,9 @@ estruturados; RAG/vector **apenas** sobre pareceres humanos históricos. Fine-tu
 | **MON** | Monitor pós-aprovação, **independente** do fluxo de recomendação | SQL, Serasa, SCR, Agrisk, CreditHub | leitura | fast |
 
 Workers devolvem ao PMO — não falam entre si. Cada agente acessa via **gateway API**, nunca o banco direto.
+
+> **Piloto:** o roster acima é o desenho-alvo. O `squad.yaml` implementa hoje o
+> subconjunto AG1 + AG4 + QA; os demais entram conforme as fontes forem plugadas.
 
 ## 4. Roteamento (SE/ENTÃO com veto)
 

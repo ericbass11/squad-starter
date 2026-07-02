@@ -50,6 +50,23 @@ def test_pipeline_tem_qa_e_checkpoint_no_fim():
     assert qa.get("on_reject")                   # QA pode mandar refazer
 
 
+def test_agents_stub_traz_vetos_e_custo():
+    from scaffolding.generator import _agents_py
+    code = _agents_py(_spec())
+    assert "VETOS" in code                 # ponto de extensão de vetos do domínio
+    assert "cost_usd" in code              # cerca de custo depende do repasse
+    assert "LLMClient" in code             # padrão LLM via gateway no guia
+
+
+def test_squad_md_usa_termination_da_spec():
+    from scaffolding.generator import _squad_md
+    spec = _spec()
+    spec.termination = "o dossiê é emitido com fontes rotuladas"
+    md = _squad_md(spec)
+    assert "o dossiê é emitido com fontes rotuladas" in md
+    assert "[escreva a condição" not in md
+
+
 def test_recusa_nome_invalido():
     errs = validate_spec(SquadSpec(name="Nome Inválido", description="x",
                                    agents=[AgentSpec(name="AG1", role="r")]))
