@@ -11,22 +11,23 @@ governança e a auditabilidade vêm prontos.
 ```bash
 pip install -r requirements.txt
 python run.py            # roda o squad de exemplo (Análise de Crédito Agro)
-pytest -q                # 6 testes: schema, guardrails, cercas
-python scripts/validate_squads.py   # valida todo SQUAD.md contra o schema
+pytest -q                # testes: schema, guardrails, cercas, manifesto, gerador
+python scripts/validate_squads.py   # valida todo squad (SQUAD.md + squad.yaml) e o pipeline
 ```
 
 Saída esperada do `run.py`: o squad roda os agentes, passa pelo checkpoint humano
 e emite a recomendação (rating + confiança + razões + precedentes). O estado de
-cada execução fica em `output/{run_id}/state.json` — o audit trail.
+cada execução fica em `output/{run_id}/` — `state.json` (snapshot por passo,
+arquivado no fim) + `events.jsonl` (log append-only, o audit trail imutável).
 
 ## O que tem dentro
 
 ```
 squad_core/            # o MOTOR reutilizável (não precisa mexer)
-  types.py             # Handoff (contrato JSON tipado), RunState
-  orchestrator.py      # PMO + as 6 cercas + pipeline declarativo + veto + state.json
+  types.py             # Handoff (contrato JSON tipado, com custo), RunState
+  orchestrator.py      # PMO + as 6 cercas + pipeline declarativo + veto + audit trail
   guardrails.py        # secret scan · blast radius · citação de fonte
-  manifest.py          # carrega o SQUAD.md e valida contra o schema
+  manifest.py          # carrega SQUAD.md + squad.yaml e valida o resultado mesclado
 schemas/
   squad-schema.json    # valida o frontmatter; em context=audax força governança
 squads/
@@ -34,7 +35,7 @@ squads/
     SQUAD.md           # manifesto humano (contrato do squad)
     squad.yaml         # sidecar: roster + pipeline que o motor consome
     agents/__init__.py # agentes de exemplo (stubs que respeitam o contrato)
-scripts/validate_squads.py   # usado no CI
+scripts/validate_squads.py   # usado no CI (schema + integridade do pipeline)
 tests/                 # garantias do motor
 docs/adr/              # decisões registradas
 ```
@@ -75,11 +76,17 @@ corpos dos agentes. Exemplos prontos: `squads/analise_credito_agro/` e
 ## As seis cercas (no `orchestrator.py`)
 
 1. `max_iterations` — freio de emergência
-2. teto de tempo/custo — wall
+2. teto de tempo (`max_execution_seconds`) **e** custo (`max_cost_per_run_usd`,
+   somado dos `cost_usd` dos handoffs) — wall
 3. condição de término — antes do happy path
-4. detecção de no-progress — aborta loop preso
+4. detecção de no-progress — aborta quando um step re-emite o mesmo handoff
 5. checkpoint humano — pausa em decisão (IA consultiva, humano com accountability)
 6. guardrails de transição — handoff tipado + secret scan + blast radius + citação
+
+Além das cercas: pipeline malformado é **recusado antes de rodar** (agente não
+registrado, `on_reject` órfão, id duplicado); veto por step **re-executa o agente**
+com o feedback no estado (máx. 2 tentativas) antes do QA; e um agente que quebra
+vira run `failed` **com o audit trail arquivado**, nunca um crash sem rastro.
 
 ## Princípios não-negociáveis
 

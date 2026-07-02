@@ -19,6 +19,9 @@ _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9]{20,}"),          # generic API key
     re.compile(r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*\S{8,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),             # AWS access key id
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),   # GitHub tokens
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),  # Slack tokens
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 ]
 
 
@@ -69,3 +72,7 @@ def output_guardrail(handoff: Handoff, blocked_if: list[str],
         if "rating" in flat:
             if "rating_sem_confianca" in blocked_if and handoff.confidence <= 0:
                 raise GuardrailError("output_guardrail: rating_sem_confianca")
+            if "rating_sem_razoes" in blocked_if and "razoes" not in flat:
+                raise GuardrailError("output_guardrail: rating_sem_razoes")
+            if "rating_sem_precedentes" in blocked_if and "precedentes" not in flat:
+                raise GuardrailError("output_guardrail: rating_sem_precedentes")

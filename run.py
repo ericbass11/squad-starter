@@ -49,16 +49,16 @@ def main() -> None:
 
     orch = Orchestrator(manifest, registry, checkpoint=human_checkpoint,
                         out_dir=str(HERE / "output"))
-    run_id = dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    run_id = dt.datetime.now().strftime("%Y-%m-%d-%H%M%S-%f")
     task = {"operacao": "OP-001", "alvo": "exemplo"}
 
     print(f"Rodando squad '{manifest['name']}' v{manifest['version']} - run {run_id}")
     state = orch.run(run_id, task)
-    print(f"status: {state.status} | steps: {state.step}")
+    print(f"status: {state.status} | steps: {state.step} | custo: US$ {state.cost_usd:.2f}")
     last = next((h for h in reversed(state.history) if h.get("handoff")), None)
     if last:
         print("  saida:", json.dumps(last["handoff"]["findings"], ensure_ascii=False))
-    print(f"  audit trail: output/{run_id}/state.json")
+    print(f"  audit trail: output/{run_id}/ (state.json + events.jsonl)")
 
 
 if __name__ == "__main__":

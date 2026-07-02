@@ -74,8 +74,8 @@ def main() -> int:
     print("  próximos passos:")
     print(f"    1. edite {rel}/SQUAD.md (condição de término, vetos do domínio)")
     print(f"    2. implemente os agentes em {rel}/agents/__init__.py (troque os stubs)")
-    print(f"    3. registre os agentes no run.py do squad e rode")
-    print("    4. python scripts/validate_squads.py && pytest -q")
+    print("    3. python scripts/validate_squads.py && pytest -q")
+    print(f"    4. python run.py {target.name}")
     return 0
 
 

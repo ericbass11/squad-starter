@@ -8,6 +8,11 @@ Covers the things that MUST hold for a regulated squad:
   - output guardrail blocks an assertion without source
   - the orchestrator terminates and archives state
   - on_reject reflection respects its cap
+  - cost budget (fence 2) escalates when exceeded
+  - no_progress (fence 4) fires on a repeated identical handoff
+  - an agent crash still archives the audit trail (failed, not lost)
+  - a malformed pipeline is refused before any agent runs
+  - veto re-dispatches the agent, which self-corrects
 """
 from __future__ import annotations
 
@@ -76,10 +81,14 @@ def test_orchestrator_terminates_and_archives(tmp_path):
 
 
 def test_on_reject_respects_cap(tmp_path):
+    calls = {"n": 0}
+
     def agent_a(state: RunState) -> Handoff:
-        # always asks for rework → should hit the reflection cap and escalate
+        # always asks for rework, with changing output → dodges the no_progress
+        # fence, so it is the reflection cap that must escalate
+        calls["n"] += 1
         return Handoff(agent="A", status=Status.NEEDS_HUMAN,
-                       findings=[{"v": "REJECT"}],
+                       findings=[{"v": "REJECT", "call": calls["n"]}],
                        sources=[Source("c", "SQL", "inferencia")], confidence=0.3)
 
     m = _manifest()
@@ -87,3 +96,84 @@ def test_on_reject_respects_cap(tmp_path):
     orch = Orchestrator(m, {"A": agent_a}, out_dir=str(tmp_path))
     state = orch.run("run-2", {"task": "t"})
     assert state.status == "escalated"
+    archived = json.loads((tmp_path / "run-2" / "state.json").read_text())
+    assert archived["reason"] == "reflection_cap"
+
+
+def test_cost_budget_escalates(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        return Handoff(agent="A", status=Status.OK, findings=[{"ok": True}],
+                       sources=[Source("c", "SQL", "fato")], confidence=0.9,
+                       cost_usd=0.60)
+
+    m = _manifest()
+    m["max_cost_per_run_usd"] = 0.50
+    m["pipeline"] = [
+        {"id": "s1", "type": "task", "agent": "A"},
+        {"id": "s2", "type": "task", "agent": "A"},
+    ]
+    orch = Orchestrator(m, {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-cost", {"task": "t"})
+    assert state.status == "escalated"
+    archived = json.loads((tmp_path / "run-cost" / "state.json").read_text())
+    assert archived["reason"] == "cost_budget"
+    assert archived["cost_usd"] == pytest.approx(0.60)
+
+
+def test_no_progress_fires_on_identical_handoff(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        # identical output every time → the rework loop is stuck
+        return Handoff(agent="A", status=Status.NEEDS_HUMAN,
+                       findings=[{"v": "REJECT"}],
+                       sources=[Source("c", "SQL", "inferencia")], confidence=0.3)
+
+    m = _manifest()
+    m["qa_reflection_rounds_max"] = 5  # cap alto: quem deve pegar é a cerca 4
+    m["pipeline"] = [{"id": "s1", "type": "task", "agent": "A", "on_reject": "s1"}]
+    orch = Orchestrator(m, {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-noprog", {"task": "t"})
+    assert state.status == "escalated"
+    archived = json.loads((tmp_path / "run-noprog" / "state.json").read_text())
+    assert archived["reason"] == "no_progress"
+
+
+def test_agent_crash_archives_audit_trail(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        raise RuntimeError("boom")
+
+    orch = Orchestrator(_manifest(), {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-crash", {"task": "t"})
+    assert state.status == "failed"
+    archived = json.loads((tmp_path / "run-crash" / "state.json").read_text())
+    assert archived["reason"] == "agent_exception"
+    assert (tmp_path / "run-crash" / "events.jsonl").exists()
+
+
+def test_malformed_pipeline_refused_before_running(tmp_path):
+    m = _manifest()
+    m["pipeline"] = [{"id": "s1", "type": "task", "agent": "NAO_EXISTE"}]
+    with pytest.raises(ValueError):
+        Orchestrator(m, {"A": lambda s: None}, out_dir=str(tmp_path))
+
+    m = _manifest()
+    m["pipeline"][0]["on_reject"] = "step-fantasma"
+    with pytest.raises(ValueError):
+        Orchestrator(m, {"A": lambda s: None}, out_dir=str(tmp_path))
+
+
+def test_veto_redispatches_and_agent_self_corrects(tmp_path):
+    def agent_a(state: RunState) -> Handoff:
+        # self-corrects when the PMO surfaces veto feedback in the history
+        got_feedback = any(h.get("veto_feedback") for h in state.history)
+        if not got_feedback:
+            return Handoff(agent="A", status=Status.OK,
+                           findings=[{"x": 1}], sources=[], confidence=0.9)
+        return Handoff(agent="A", status=Status.OK, findings=[{"x": 1}],
+                       sources=[Source("c", "SQL", "fato")], confidence=0.9)
+
+    m = _manifest()
+    m["pipeline"][0]["veto_conditions"] = ["assercao_sem_fonte"]
+    orch = Orchestrator(m, {"A": agent_a}, out_dir=str(tmp_path))
+    state = orch.run("run-veto", {"task": "t"})
+    assert state.status == "completed"
+    assert any(h.get("veto_feedback") for h in state.history)

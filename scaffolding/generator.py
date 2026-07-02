@@ -259,7 +259,6 @@ def generate(spec: SquadSpec) -> Path:
 
     target = ROOT / "squads" / spec.module
     (target / "agents").mkdir(parents=True, exist_ok=True)
-    (target / "tasks").mkdir(parents=True, exist_ok=True)
     (target / "SQUAD.md").write_text(_squad_md(spec), encoding="utf-8")
     (target / "squad.yaml").write_text(_squad_yaml(spec), encoding="utf-8")
     (target / "__init__.py").write_text("", encoding="utf-8")
